@@ -1,0 +1,15 @@
+database, search_term, search_outcome
+web of science, ((TI=(High flow nasal cannula)) OR TI=(hfnc)) AND TI=('systematic review' OR 'meta-review'), 5
+cochrane library, (HIGH FLOW NASAL CANNULA):ti,ab,kw OR (HFNC):ti,ab,kw (Word variations have been searched)" in Cochrane Reviews (Word variations have been searched), 8
+google scholar, high flow nasal cannula HFNC systematic review meta-analysis perioperative period, 1100
+pubmed, (((HFNC[Title]) OR ('high flow nasal cannula'[Title])) AND (('systematic review'[Title/Abstract]) OR (meta-analysis[Title/Abstract]))) NOT ((protocol[Title]) OR (comment[Title])), 133
+Springer nature link, ('high flow nasal cannula' OR hfnc) AND ('systematic review' OR meta-analysis), 26
+Embase, ('high flow nasal cannula':ab,ti OR hfnc:ab,ti) AND 'systematic review':ab,ti, 261
+Embase, ('high flow nasal cannula':ab,ti OR hfnc:ab,ti) AND 'systematic review':ab,ti AND ('perioperative period' OR 'surgery' OR 'anesthesia'), 70
+
+
+
+
+
+
+
