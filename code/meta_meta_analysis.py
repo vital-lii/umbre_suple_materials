@@ -1,4 +1,4 @@
-# Meta–meta analysis (sub-analysis ready): enhanced weights, no GLS, no AMSTAR layers
+# Meta–meta analysis, no GLS, no AMSTAR layers (all comparators)
 import sys, os, re, platform
 import pandas as pd, numpy as np
 import scipy, matplotlib
@@ -13,11 +13,11 @@ from scipy.stats import t as student_t
 CONFIG = {
     "tau2_method": "PM",            # "DL" | "PM" | "REML"
     "use_hartung_knapp": True,
-    "heterogeneity_i2_threshold": 50.0,  # switch FE/RE at I² > threshold
+    "heterogeneity_i2_threshold": 0,  # (deprecated: always use Random model)
     # OR->RR conversion
     "or_to_rr_baseline_risk": None,      # e.g., 0.2; if None, use per-row baseline_risk if present
     # Enhanced weighting
-    "use_enhanced_weights": True,
+    "use_enhanced_weights": False,
     "weight_sample_size_power": 0.5,
     "weight_quality_multiplier": True,
     "show_weight_info": True,
@@ -88,7 +88,7 @@ def calculate_enhanced_weights(df: pd.DataFrame, base_weights: np.ndarray) -> np
     return enhanced_weights
 
 # ---------------------
-# Tau^2 estimators and pooling
+# Tau estimators and pooling
 # ---------------------
 def tau2_dl(weights, effects):
     k = len(effects)
@@ -156,7 +156,9 @@ def pool_random(effects, se, tau2, use_hk: bool):
     ci_lo, ci_hi = mu - z*se_mu, mu + z*se_mu
     return mu, se_mu, (ci_lo, ci_hi), "Random"
 
-
+# ---------------------
+# Forest plotting 
+# ---------------------
 def plot_forest_for_outcome(outcome: str, gg: pd.DataFrame, pooled_tuple, fig_dir: str):
     os.makedirs(fig_dir, exist_ok=True)
     mu, ci_lo, ci_hi, es_type, model_used, I2 = pooled_tuple
@@ -164,16 +166,15 @@ def plot_forest_for_outcome(outcome: str, gg: pd.DataFrame, pooled_tuple, fig_di
         x_vals = gg["effect_size"].astype(float).values
         x_lo = gg["ci_lower"].astype(float).values
         x_hi = gg["ci_upper"].astype(float).values
-        overall_text = f"RR={mu:.2g} ({ci_lo:.2g} to {ci_hi:.2g})"
+        overall_text = f"{es_type.upper()}={mu:.3f} ({ci_lo:.3f} to {ci_hi:.3f})"
         x_label = f"{es_type.upper()} (ratio)"
     else:
         x_vals = gg["effect_size"].astype(float).values
         x_lo = gg["ci_lower"].astype(float).values
         x_hi = gg["ci_upper"].astype(float).values
-        overall_text = f"{mu:.2g} ({ci_lo:.2g} to {ci_hi:.2g})"
+        overall_text = f"{mu:.3f} ({ci_lo:.3f} to {ci_hi:.3f})"
         x_label = "Mean Difference"
 
-    # Compute display weights using FE or RE weights for marker sizing
     se = gg["se"].astype(float).values
     vi = se**2
     if model_used.startswith("Random"):
@@ -190,8 +191,10 @@ def plot_forest_for_outcome(outcome: str, gg: pd.DataFrame, pooled_tuple, fig_di
         weight_pct = (w / wsum) * 100.0
     weight_pct_plot = np.clip(np.nan_to_num(weight_pct, nan=0.0, posinf=0.0, neginf=0.0), 0.0, None)
 
-    labels = (gg.get("First Author", gg.index.astype(str)).astype(str) + " (" + gg.get("Year", pd.Series([""]*len(gg))).astype(str) + ")").tolist()
-    right_texts = [f"{m:.2g} ({loi:.2g} to {hii:.2g})" for m, loi, hii in zip(x_vals, x_lo, x_hi)]
+    years = gg.get("Year", pd.Series([""]*len(gg)))
+    years_clean = years.fillna("").astype(int).astype(str).replace("nan", "")
+    labels = (gg.get("First Author", gg.index.astype(str)).astype(str) + " (" + years_clean + ")").tolist()
+    right_texts = [f"{m:.3f} ({loi:.3f} to {hii:.3f})" for m, loi, hii in zip(x_vals, x_lo, x_hi)]
 
     y_pos = np.arange(len(labels))[::-1]
     plt.figure(figsize=(9, 0.5*len(labels) + 2.8))
@@ -215,7 +218,7 @@ def plot_forest_for_outcome(outcome: str, gg: pd.DataFrame, pooled_tuple, fig_di
 
     ax.set_title(
         f"{outcome}\n"
-        f"Model: {model_used}, k={len(labels)}, I²={I2:.1f}%",
+        f"Model: {model_used}, k={len(labels)}, I\u00b2={I2:.1f}%",
         fontsize=12,
     )
     ax.grid(axis="x", linestyle=":", alpha=0.35)
@@ -225,31 +228,48 @@ def plot_forest_for_outcome(outcome: str, gg: pd.DataFrame, pooled_tuple, fig_di
     plt.savefig(fpath, dpi=300, bbox_inches="tight")
     plt.close()
 
-
+# ---------------------
+# Core meta–meta routine
+# ---------------------
 def run_meta_meta(df: pd.DataFrame, out_xlsx: str):
     os.makedirs(os.path.dirname(out_xlsx), exist_ok=True)
     rows = []
     fig_dir = os.path.join(os.path.dirname(out_xlsx), "fig_meta_meta_all")
     for outcome, g in df.groupby("Outcomes"):
         gg = g.dropna(subset=["effect_size", "ci_lower", "ci_upper", "Effect Size"]).copy()
-        if len(gg) < 2:
+        if len(gg) < 3:
             continue
         es_mode = gg["Effect Size"].astype(str).str.lower().mode()
         if es_mode.empty:
             continue
         es_type = es_mode.iat[0]
         gg = gg[gg["Effect Size"].astype(str).str.lower() == es_type]
-        if len(gg) < 2:
+        if len(gg) < 3:
             continue
 
         if es_type in ["rr", "or"]:
+            valid_mask = (gg["ci_upper"].astype(float) > 0) & (gg["ci_lower"].astype(float) > 0)
+            gg = gg[valid_mask].copy()
+            if len(gg) < 2:
+                print(f"跳过 {outcome}: 有效CI数据不足 (n={len(gg)})")
+                continue
             tmp_se = (np.log(gg["ci_upper"].astype(float).values) - np.log(gg["ci_lower"].astype(float).values)) / (2 * stats.norm.ppf(0.975))
         else:
             tmp_se = ((gg["ci_upper"].astype(float) - gg["ci_lower"].astype(float)) / (2 * stats.norm.ppf(0.975))).values
         gg = gg.copy()
         gg = gg.reset_index(drop=False).rename(columns={"index": "_orig_idx_"})
         gg["_tmp_se_"] = tmp_se
+        
+        gg = gg.dropna(subset=["_tmp_se_"])
+        if len(gg) < 2:
+            print(f"跳过 {outcome}: 去除NaN后研究数量不足 (n={len(gg)})")
+            continue
+            
         best_idx = gg.groupby("SR_ID")["_tmp_se_"].idxmin()
+        best_idx = best_idx.dropna()
+        if best_idx.empty:
+            print(f"跳过 {outcome}: 无法找到有效的最小SE索引")
+            continue
         gg = gg.loc[best_idx].copy()
         gg = gg.sort_values("_orig_idx_")
         
@@ -274,14 +294,9 @@ def run_meta_meta(df: pd.DataFrame, out_xlsx: str):
         k = len(y)
         I2 = float(max(0.0, (Q - (k - 1)) / Q)) * 100.0 if (k > 1 and Q > 0) else 0.0
 
-        if I2 > CONFIG.get("heterogeneity_i2_threshold", 50.0):
-            tau2 = float(estimate_tau2(se, y, CONFIG.get("tau2_method", "PM")))
-            mu, se_mu, (ci_lo, ci_hi), model_used = pool_random(y, se, tau2, CONFIG.get("use_hartung_knapp", True))
-        else:
-            z = 1.96
-            mu, se_mu = mu_fe, se_fe
-            ci_lo, ci_hi = mu - z*se_mu, mu + z*se_mu
-            model_used = "Fixed"
+        # Always use Random model
+        tau2 = float(estimate_tau2(se, y, CONFIG.get("tau2_method", "PM")))
+        mu, se_mu, (ci_lo, ci_hi), model_used = pool_random(y, se, tau2, CONFIG.get("use_hartung_knapp", True))
 
         disp_mu, disp_lo, disp_hi = backtransform(mu), backtransform(ci_lo), backtransform(ci_hi)
         rows.append({
@@ -295,6 +310,7 @@ def run_meta_meta(df: pd.DataFrame, out_xlsx: str):
             "CI Upper": float(disp_hi),
         })
 
+        # Plot per-outcome forest
         plot_forest_for_outcome(
             outcome,
             gg,
@@ -312,10 +328,38 @@ def run_meta_meta(df: pd.DataFrame, out_xlsx: str):
 def prepare_dataframe(input_path: str) -> pd.DataFrame:
     _, ext = os.path.splitext(input_path)
     if ext.lower() in [".csv", ".tsv", ".txt"]:
-        sep = "\t" if ext.lower() != ".tsv" else "\t"
-        df = pd.read_csv(input_path, sep=sep)
+        try:
+            df = pd.read_csv(input_path, sep=",", encoding='utf-8')
+        except UnicodeDecodeError:
+            try:
+                df = pd.read_csv(input_path, sep=",", encoding='gbk')
+            except UnicodeDecodeError:
+                df = pd.read_csv(input_path, sep=",", encoding='latin-1')
+        except:
+            try:
+                df = pd.read_csv(input_path, sep="\t", encoding='utf-8')
+            except UnicodeDecodeError:
+                try:
+                    df = pd.read_csv(input_path, sep="\t", encoding='gbk')
+                except UnicodeDecodeError:
+                    df = pd.read_csv(input_path, sep="\t", encoding='latin-1')
     else:
-        df = pd.read_csv(input_path, sep="\t")
+        try:
+            df = pd.read_csv(input_path, sep=",", encoding='utf-8')
+        except UnicodeDecodeError:
+            try:
+                df = pd.read_csv(input_path, sep=",", encoding='gbk')
+            except UnicodeDecodeError:
+                df = pd.read_csv(input_path, sep=",", encoding='latin-1')
+        except:
+            try:
+                df = pd.read_csv(input_path, sep="\t", encoding='utf-8')
+            except UnicodeDecodeError:
+                try:
+                    df = pd.read_csv(input_path, sep="\t", encoding='gbk')
+                except UnicodeDecodeError:
+                    df = pd.read_csv(input_path, sep="\t", encoding='latin-1')
+
 
     df = df.rename(columns={
         "Phase": "phase",
@@ -323,16 +367,20 @@ def prepare_dataframe(input_path: str) -> pd.DataFrame:
         "model_reported": "Model",
         "effect_type": "Effect Size",
     })
+
     df["Model"] = df.get("Model", pd.Series([np.nan]*len(df))).astype(str).str.strip().replace({"REM": "Random", "FIXED": "Fixed"})
     df["Effect Size"] = df.get("Effect Size", pd.Series([np.nan]*len(df))).astype(str).str.strip().str.lower().replace({"wmd": "md"})
     df["AMSTAR_level"] = df.get("AMSTAR_level", pd.Series(["low"]*len(df))).astype(str).str.strip().str.title().replace({"Critically Low": "Critically low"})
     df["amstar_norm"] = df["AMSTAR_level"].map(normalize_amstar)
 
+
     parsed = df.get("Value(95% CI)", pd.Series([np.nan]*len(df))).apply(parse_ci).tolist()
     if len(parsed) == len(df):
         df[["effect_size", "ci_lower", "ci_upper"]] = parsed
+
     if "se" not in df.columns or df["se"].isna().all():
         df["se"] = (df["ci_upper"] - df["ci_lower"]) / (2 * stats.norm.ppf(0.975))
+
 
     df["P-value"] = df.get("P-value", pd.Series([np.nan]*len(df))).astype(str).str.replace("＜", "<").str.replace("＞", ">").str.replace(" ", "")
     def parse_pv(x):
@@ -347,6 +395,7 @@ def prepare_dataframe(input_path: str) -> pd.DataFrame:
             return np.nan
     df["P-value"] = df["P-value"].apply(parse_pv)
 
+
     if CONFIG["or_to_rr_baseline_risk"] is not None or "baseline_risk" in df.columns:
         df = df.apply(lambda r: convert_or_to_rr_if_needed(r, CONFIG["or_to_rr_baseline_risk"]), axis=1)
 
@@ -357,10 +406,12 @@ def main():
     print(f"Python: {sys.version.split()[0]}, OS: {platform.platform()}")
     print(f"pandas: {pd.__version__}, numpy: {np.__version__}, scipy: {scipy.__version__}, matplotlib: {matplotlib.__version__}")
 
+
     if len(sys.argv) < 3:
         print("Usage: python meta_meta_subanalysis.py <input_csv_tsv> <output_xlsx>")
-        default_in = r"D:\article_tho\copd_inhalation_tcm\TEST\META\LIT\scripts\data\child.csv"
-        default_out = "data_clean_output/meta_meta_subanalysis.xlsx"
+
+        default_in = r"D:\article_tho\copd_inhalation_tcm\TEST\META\LIT\scripts\data\all.csv"
+        default_out = "data_clean_output/meta_all.xlsx"
         print(f"Falling back to defaults: input={default_in}, output={default_out}")
         input_path = default_in
         out_xlsx = default_out
@@ -369,14 +420,9 @@ def main():
         out_xlsx = sys.argv[2]
 
     df = prepare_dataframe(input_path)
+
     res_df = run_meta_meta(df, out_xlsx)
-    # GLS with CCA overlap
-    #try:
-    #    run_gls_and_plots(df, out_xlsx)
-    #except Exception as e:
-    #    import traceback
-    #    print(f"GLS sensitivity skipped: {e}")
-    #    traceback.print_exc()
+
         
     if not res_df.empty:
         print("\nMeta-meta (all):")
@@ -384,6 +430,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
